@@ -1,12 +1,22 @@
-# Load required libraries
 library(shiny)
 library(shinydashboard)
 library(dplyr)
 library(ggplot2)
 library(forecast)
 library(plotly)
+library(DT)
+library(readr)
+library(knitr)
+library(rmarkdown)
 
-# --- Data Preparation ---
+# Load data
+crop_yield_2000_2023 <- tryCatch({
+  read_csv("crop_yield_2000_2023.csv")
+}, error = function(e) {
+  stop("Error loading data file: ", e$message, ". Ensure 'crop_yield_2000_2023.csv' is in the app directory.")
+})
+
+# African countries list
 african_countries <- c(
   "Algeria", "Angola", "Benin", "Botswana", "Burkina Faso", "Burundi", "Cabo Verde",
   "Cameroon", "Central African Republic", "Chad", "Comoros", "Congo",
@@ -20,31 +30,44 @@ african_countries <- c(
   "Zimbabwe"
 )
 
-# Assume crop_yield_2000_2023 is loaded
-africa_data <- crop_yield_2000_2023 %>%
-  filter(Area %in% african_countries) %>%
-  select(Area, Item, Year, Value, `Flag Description`)
-
 # --- UI ---
 ui <- dashboardPage(
-  dashboardHeader(title = "Africa Crop Yield Dashboard"),
+  skin = "blue",
+  dashboardHeader(title = "Africa Crop Yield Dashboard", titleWidth = 300),
   dashboardSidebar(
+    width = 250,
     sidebarMenu(
       menuItem("Overview", tabName = "overview", icon = icon("dashboard")),
       menuItem("Analysis", tabName = "analysis", icon = icon("chart-bar")),
       menuItem("Forecast", tabName = "forecast", icon = icon("chart-line")),
-      menuItem("Crop Risk", tabName = "crop_risk", icon = icon("exclamation-triangle"))
+      menuItem("Crop Risk", tabName = "crop_risk", icon = icon("exclamation-triangle")),
+      menuItem("Report", tabName = "report", icon = icon("file-alt"))
     ),
-    selectInput("selected_item", "Select Crop:",
-                choices = c("All Crops" = "All Crops", sort(unique(africa_data$Item))),
-                selected = "All Crops"),
+    selectInput("selected_item", "Select Crops:",
+                choices = NULL, multiple = TRUE, selected = "All Crops"),
     selectInput("selected_countries", "Select Countries (up to 2):",
-                choices = c("All Countries" = "All Countries", sort(unique(africa_data$Area))),
-                multiple = TRUE, selected = "All Countries"),
+                choices = NULL, multiple = TRUE, selected = "All Countries"),
     sliderInput("year_range", "Year Range:",
-                min = 2000, max = 2023, value = c(2000, 2023))
+                min = 2000, max = 2023, value = c(2000, 2023), sep = ""),
+    downloadButton("download_report", "Download Report", style = "margin: 10px;")
   ),
   dashboardBody(
+    tags$head(tags$style(HTML("
+      .content-wrapper { background-color: #f5f6fa; }
+      .main-sidebar { background-color: #2c3e50; }
+      .box { 
+        border-radius: 8px; 
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+        background-color: white;
+        padding: 15px;
+      }
+      .shiny-plot-output { width: 100% !important; height: 400px !important; }
+      .value-box { border-radius: 8px; }
+      .sidebar-menu li a { color: white !important; }
+      .selectize-input { border-radius: 4px; padding: 5px; }
+      .download-button { background-color: #3498db; color: white; border-radius: 4px; }
+    "))),
     tabItems(
       tabItem(tabName = "overview",
               fluidRow(
@@ -53,22 +76,18 @@ ui <- dashboardPage(
                 valueBoxOutput("kpi_trend", width = 3),
                 valueBoxOutput("kpi_percent_increase", width = 3)
               ),
+              uiOutput("overview_plots"),
               fluidRow(
-                box(plotlyOutput("ts_plot"), width = 6),
-                box(plotlyOutput("top_crops_plot"), width = 6)
-              ),
-              fluidRow(
-                box(plotlyOutput("top_countries_plot"), width = 6),
-                box(plotOutput("yield_dist_plot"), width = 6)
+                box(plotlyOutput("trend_plot"), width = 12, title = "Yield Trend Over Time")
               )
       ),
       tabItem(tabName = "analysis",
               fluidRow(
-                box(plotlyOutput("boxplot_crop"), width = 6),
-                box(tableOutput("outliers_table"), width = 6)
+                box(plotlyOutput("boxplot_crop"), width = 6, title = "Yield Distribution"),
+                box(tableOutput("outliers_table"), width = 6, title = "Top Outliers")
               ),
               fluidRow(
-                box(tableOutput("comparison_table"), width = 12)
+                box(DTOutput("comparison_table"), width = 12, title = "Crop Performance Comparison")
               )
       ),
       tabItem(tabName = "forecast",
@@ -79,12 +98,17 @@ ui <- dashboardPage(
                 valueBoxOutput("forecast_mape", width = 3)
               ),
               fluidRow(
-                box(plotlyOutput("crop_forecast_plot"), width = 12)
+                box(plotlyOutput("crop_forecast_plot"), width = 12, title = "Yield Forecast")
               )
       ),
       tabItem(tabName = "crop_risk",
               fluidRow(
-                box(tableOutput("crops_in_danger_table"), width = 12)
+                box(DTOutput("crops_in_danger_table"), width = 12, title = "Crops at Risk")
+              )
+      ),
+      tabItem(tabName = "report",
+              fluidRow(
+                box(htmlOutput("report_preview"), width = 12, title = "Performance Report Preview")
               )
       )
     )
@@ -94,12 +118,36 @@ ui <- dashboardPage(
 # --- Server ---
 server <- function(input, output, session) {
   
-  # Reactive: Filtered data based on crop and country selection
+  # Reactive: Filter for African countries
+  africa_data <- reactive({
+    crop_yield_2000_2023 %>%
+      filter(Area %in% african_countries) %>%
+      select(Area, Item, Year, Value) %>%
+      mutate(
+        Area = as.character(Area),
+        Item = as.character(Item),
+        Year = as.integer(Year),
+        Value = as.numeric(Value)
+      )
+  })
+  
+  # Update selectInput choices
+  observe({
+    data <- africa_data()
+    updateSelectInput(session, "selected_item",
+                      choices = c("All Crops" = "All Crops", sort(unique(data$Item))),
+                      selected = "All Crops")
+    updateSelectInput(session, "selected_countries",
+                      choices = c("All Countries" = "All Countries", sort(unique(data$Area))),
+                      selected = "All Countries")
+  })
+  
+  # Reactive: Filtered data
   filtered_data <- reactive({
-    data <- africa_data
+    data <- africa_data()
     
-    if (input$selected_item != "All Crops") {
-      data <- data %>% filter(Item == input$selected_item)
+    if (!("All Crops" %in% input$selected_item)) {
+      data <- data %>% filter(Item %in% input$selected_item)
     }
     
     if (!("All Countries" %in% input$selected_countries)) {
@@ -109,9 +157,9 @@ server <- function(input, output, session) {
     data %>% filter(Year >= input$year_range[1], Year <= input$year_range[2])
   })
   
-  # Reactive: Africa-wide average yield (constant KPI)
+  # Reactive: Africa-wide average yield
   africa_avg_yield <- reactive({
-    africa_data %>%
+    africa_data() %>%
       filter(Year >= input$year_range[1], Year <= input$year_range[2]) %>%
       summarise(Avg_Yield = mean(Value, na.rm = TRUE)) %>%
       pull(Avg_Yield)
@@ -119,7 +167,7 @@ server <- function(input, output, session) {
   
   # Reactive: Top 10 crops
   top_crops_data <- reactive({
-    data <- africa_data
+    data <- africa_data()
     if (!("All Countries" %in% input$selected_countries)) {
       data <- data %>% filter(Area %in% input$selected_countries)
     }
@@ -132,9 +180,9 @@ server <- function(input, output, session) {
   
   # Reactive: Top 10 countries
   top_countries_data <- reactive({
-    data <- africa_data
-    if (input$selected_item != "All Crops") {
-      data <- data %>% filter(Item == input$selected_item)
+    data <- africa_data()
+    if (!("All Crops" %in% input$selected_item)) {
+      data <- data %>% filter(Item %in% input$selected_item)
     }
     data %>%
       group_by(Area) %>%
@@ -143,22 +191,42 @@ server <- function(input, output, session) {
       slice_head(n = 10)
   })
   
-  # Reactive: Crops in danger (declining yields)
+  # Reactive: Bottom 10 countries
+  bottom_countries_data <- reactive({
+    data <- africa_data()
+    if (!("All Crops" %in% input$selected_item)) {
+      data <- data %>% filter(Item %in% input$selected_item)
+    }
+    data %>%
+      group_by(Area) %>%
+      summarise(Avg_Yield = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+      arrange(Avg_Yield) %>%
+      slice_head(n = 10)
+  })
+  
+  # Reactive: Crops in danger
   crops_in_danger <- reactive({
-    data <- africa_data
+    data <- africa_data()
     if (!("All Countries" %in% input$selected_countries)) {
       data <- data %>% filter(Area %in% input$selected_countries)
     }
+    
+    yield_quantiles <- quantile(data$Value, c(0.1, 0.25), na.rm = TRUE)
     
     data %>%
       group_by(Area, Item) %>%
       summarise(
         CAGR = ((mean(Value[Year == max(Year)], na.rm = TRUE) / 
-                 mean(Value[Year == min(Year)], na.rm = TRUE))^(1/(max(Year) - min(Year))) - 1) * 100,
+                   mean(Value[Year == min(Year)], na.rm = TRUE))^(1/(max(Year) - min(Year))) - 1) * 100,
         Avg_Yield = mean(Value, na.rm = TRUE),
         .groups = "drop"
       ) %>%
-      filter(CAGR < 0 | Avg_Yield < quantile(africa_data$Value, 0.25, na.rm = TRUE)) %>%
+      mutate(Risk_Level = case_when(
+        CAGR < -1 | Avg_Yield < yield_quantiles[1] ~ "High",
+        CAGR < 0 | Avg_Yield < yield_quantiles[2] ~ "Moderate",
+        TRUE ~ "Low"
+      )) %>%
+      filter(Risk_Level %in% c("High", "Moderate")) %>%
       arrange(CAGR, Avg_Yield) %>%
       slice_head(n = 10)
   })
@@ -168,14 +236,14 @@ server <- function(input, output, session) {
     data <- filtered_data()
     avg_yield <- round(mean(data$Value, na.rm = TRUE), 2)
     
-    subtitle_text <- if (input$selected_item == "All Crops" && "All Countries" %in% input$selected_countries) {
+    subtitle_text <- if ("All Crops" %in% input$selected_item && "All Countries" %in% input$selected_countries) {
       "Avg Yield (All Crops, All Countries)"
-    } else if (input$selected_item != "All Crops" && "All Countries" %in% input$selected_countries) {
-      paste("Avg Yield for", input$selected_item)
-    } else if (input$selected_item == "All Crops" && !("All Countries" %in% input$selected_countries)) {
+    } else if (!("All Crops" %in% input$selected_item) && "All Countries" %in% input$selected_countries) {
+      paste("Avg Yield for", paste(input$selected_item, collapse = ", "))
+    } else if ("All Crops" %in% input$selected_item && !("All Countries" %in% input$selected_countries)) {
       paste("Avg Yield in", paste(input$selected_countries, collapse = ", "))
     } else {
-      paste("Avg Yield for", input$selected_item, "in", paste(input$selected_countries, collapse = ", "))
+      paste("Avg Yield for", paste(input$selected_item, collapse = ", "), "in", paste(input$selected_countries, collapse = ", "))
     }
     
     valueBox(
@@ -229,7 +297,7 @@ server <- function(input, output, session) {
       valueBox("N/A", subtitle = "CAGR", icon = icon("question"), color = "aqua")
     } else {
       cagr <- ((yearly_data$Avg_Yield[nrow(yearly_data)] / 
-                yearly_data$Avg_Yield[1])^(1/(nrow(yearly_data)-1)) - 1) * 100
+                  yearly_data$Avg_Yield[1])^(1/(nrow(yearly_data)-1)) - 1) * 100
       valueBox(
         paste0(round(cagr, 2), "%"),
         subtitle = "CAGR (Selected Period)",
@@ -239,8 +307,33 @@ server <- function(input, output, session) {
     }
   })
   
-  # Overview: Time Series Plot
-  output$ts_plot <- renderPlotly({
+  # Overview: Dynamic Plot Layout
+  output$overview_plots <- renderUI({
+    show_top_crops <- "All Crops" %in% input$selected_item
+    show_countries <- "All Countries" %in% input$selected_countries
+    
+    if (show_top_crops && show_countries) {
+      fluidRow(
+        box(plotlyOutput("top_crops_plot"), width = 6, title = "Top 10 Crops"),
+        box(plotlyOutput("top_countries_plot"), width = 6, title = "Top 10 Countries"),
+        box(plotlyOutput("bottom_countries_plot"), width = 6, title = "Bottom 10 Countries")
+      )
+    } else if (show_top_crops) {
+      fluidRow(
+        box(plotlyOutput("top_crops_plot"), width = 12, title = "Top 10 Crops")
+      )
+    } else if (show_countries) {
+      fluidRow(
+        box(plotlyOutput("top_countries_plot"), width = 6, title = "Top 10 Countries"),
+        box(plotlyOutput("bottom_countries_plot"), width = 6, title = "Bottom 10 Countries")
+      )
+    } else {
+      fluidRow()
+    }
+  })
+  
+  # Overview: Trend Plot
+  output$trend_plot <- renderPlotly({
     req(input$selected_item, input$selected_countries)
     data <- filtered_data()
     
@@ -248,21 +341,22 @@ server <- function(input, output, session) {
       group_by(Year, Area) %>%
       summarise(Avg_Yield = mean(Value, na.rm = TRUE), .groups = "drop")
     
-    title_text <- if (input$selected_item == "All Crops" && "All Countries" %in% input$selected_countries) {
+    title_text <- if ("All Crops" %in% input$selected_item && "All Countries" %in% input$selected_countries) {
       "Africa-Wide Average Yield (All Crops)"
-    } else if (input$selected_item != "All Crops" && "All Countries" %in% input$selected_countries) {
-      paste("Yield Trend for", input$selected_item, "in Africa")
-    } else if (input$selected_item == "All Crops" && !("All Countries" %in% input$selected_countries)) {
+    } else if (!("All Crops" %in% input$selected_item) && "All Countries" %in% input$selected_countries) {
+      paste("Yield Trend for", paste(input$selected_item, collapse = ", "), "in Africa")
+    } else if ("All Crops" %in% input$selected_item && !("All Countries" %in% input$selected_countries)) {
       paste("Yield Trend in", paste(input$selected_countries, collapse = ", "), "(All Crops)")
     } else {
-      paste("Yield Trend for", input$selected_item, "in", paste(input$selected_countries, collapse = ", "))
+      paste("Yield Trend for", paste(input$selected_item, collapse = ", "), "in", paste(input$selected_countries, collapse = ", "))
     }
     
     p <- ggplot(plot_data, aes(x = Year, y = Avg_Yield, color = Area)) +
-      geom_line(linewidth = 1) +
+      geom_line(size = 1) +
       geom_point(size = 2) +
       labs(title = title_text, x = "Year", y = "Yield (kg/ha)") +
       theme_minimal() +
+      theme(legend.position = "bottom") +
       ylim(0, max(plot_data$Avg_Yield, na.rm = TRUE) * 1.1)
     
     ggplotly(p) %>% config(displayModeBar = FALSE)
@@ -271,14 +365,6 @@ server <- function(input, output, session) {
   # Overview: Top 10 Crops Plot
   output$top_crops_plot <- renderPlotly({
     req(input$selected_countries)
-    
-    if (input$selected_item != "All Crops") {
-      p <- ggplot() + 
-        annotate("text", x = 0, y = 0, label = "Select 'All Crops' to see top crops", 
-                 size = 8, color = "grey") +
-        theme_void()
-      return(ggplotly(p))
-    }
     
     data <- top_crops_data()
     p <- ggplot(data, aes(x = reorder(Item, Avg_Yield), y = Avg_Yield, fill = Item)) +
@@ -296,19 +382,11 @@ server <- function(input, output, session) {
   output$top_countries_plot <- renderPlotly({
     req(input$selected_item)
     
-    if (!("All Countries" %in% input$selected_countries)) {
-      p <- ggplot() + 
-        annotate("text", x = 0, y = 0, label = "Select 'All Countries' to see top countries", 
-                 size = 8, color = "grey") +
-        theme_void()
-      return(ggplotly(p))
-    }
-    
     data <- top_countries_data()
     p <- ggplot(data, aes(x = reorder(Area, Avg_Yield), y = Avg_Yield, fill = Area)) +
       geom_bar(stat = "identity") +
       coord_flip() +
-      labs(title = paste("Top 10 Countries for", input$selected_item), 
+      labs(title = paste("Top 10 Countries for", paste(input$selected_item, collapse = ", ")), 
            x = "Country", y = "Average Yield (kg/ha)") +
       theme_minimal() +
       theme(legend.position = "none")
@@ -316,19 +394,20 @@ server <- function(input, output, session) {
     ggplotly(p) %>% config(displayModeBar = FALSE)
   })
   
-  # Overview: Yield Distribution Histogram
-  output$yield_dist_plot <- renderPlot({
-    req(input$selected_item, input$selected_countries)
-    data <- filtered_data()
+  # Overview: Bottom 10 Countries Plot
+  output$bottom_countries_plot <- renderPlotly({
+    req(input$selected_item)
     
-    title_text <- "Yield Distribution"
-    if (input$selected_item != "All Crops") title_text <- paste(title_text, "for", input$selected_item)
-    if (!("All Countries" %in% input$selected_countries)) title_text <- paste(title_text, "in", paste(input$selected_countries, collapse = ", "))
+    data <- bottom_countries_data()
+    p <- ggplot(data, aes(x = reorder(Area, -Avg_Yield), y = Avg_Yield, fill = Area)) +
+      geom_bar(stat = "identity") +
+      coord_flip() +
+      labs(title = paste("Bottom 10 Countries for", paste(input$selected_item, collapse = ", ")), 
+           x = "Country", y = "Average Yield (kg/ha)") +
+      theme_minimal() +
+      theme(legend.position = "none")
     
-    ggplot(data, aes(x = Value)) +
-      geom_histogram(bins = 30, fill = "#1f77b4", color = "black") +
-      labs(title = title_text, x = "Yield (kg/ha)", y = "Count") +
-      theme_minimal()
+    ggplotly(p) %>% config(displayModeBar = FALSE)
   })
   
   # Analysis: Boxplot for Crop
@@ -338,7 +417,7 @@ server <- function(input, output, session) {
     
     p <- ggplot(data, aes(y = Value, x = Area, fill = Area)) +
       geom_boxplot() +
-      labs(title = paste("Yield Distribution for", input$selected_item), 
+      labs(title = paste("Yield Distribution for", paste(input$selected_item, collapse = ", ")), 
            x = "Country", y = "Yield (kg/ha)") +
       theme_minimal() +
       theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
@@ -353,26 +432,35 @@ server <- function(input, output, session) {
     outliers <- data %>%
       arrange(desc(Value)) %>%
       slice_head(n = 5) %>%
-      select(Area, Year, Value) %>%
-      rename(Country = Area)
+      select(Area, Item, Year, Value) %>%
+      rename(Country = Area, Crop = Item)
     outliers
   })
   
   # Analysis: Comparison Table
-  output$comparison_table <- renderTable({
+  output$comparison_table <- DT::renderDT({
     req(input$selected_item, input$selected_countries)
     data <- filtered_data()
     
-    data %>%
+    table_data <- data %>%
       group_by(Area, Item) %>%
       summarise(
         Avg_Yield = mean(Value, na.rm = TRUE),
         CAGR = ((mean(Value[Year == max(Year)], na.rm = TRUE) / 
-                 mean(Value[Year == min(Year)], na.rm = TRUE))^(1/(max(Year) - min(Year))) - 1) * 100,
+                   mean(Value[Year == min(Year)], na.rm = TRUE))^(1/(max(Year) - min(Year))) - 1) * 100,
         Volatility = sd(Value, na.rm = TRUE) / mean(Value, na.rm = TRUE) * 100,
         .groups = "drop"
       ) %>%
-      arrange(CAGR)
+      arrange(CAGR) %>%
+      mutate(
+        Avg_Yield = round(Avg_Yield, 2),
+        CAGR = round(CAGR, 2),
+        Volatility = round(Volatility, 2)
+      )
+    
+    DT::datatable(table_data, 
+                  options = list(pageLength = 10, autoWidth = TRUE),
+                  rownames = FALSE)
   })
   
   # Forecast: ARIMA Forecast Data
@@ -400,7 +488,6 @@ server <- function(input, output, session) {
     model <- auto.arima(train_ts)
     forecast <- forecast(model, h = 5)
     
-    # Calculate MAPE on test set
     test_forecast <- forecast(model, h = length(test_ts))
     mape <- mean(abs((as.numeric(test_ts) - as.numeric(test_forecast$mean)) / as.numeric(test_ts)) * 100, na.rm = TRUE)
     
@@ -469,7 +556,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # Forecast: Plot
+  # Forecast: Plot with Smooth Line
   output$crop_forecast_plot <- renderPlotly({
     data <- crop_forecast_data()
     if (is.null(data)) {
@@ -482,14 +569,14 @@ server <- function(input, output, session) {
     
     plot_data <- bind_rows(data$historical, data$forecast)
     p <- ggplot(plot_data, aes(x = Year, y = Yield, color = Type)) +
-      geom_line(data = ~ filter(.x, Type == "Historical"), linewidth = 1.2) +
-      geom_line(data = ~ filter(.x, Type == "Forecast"), linetype = "dashed", linewidth = 1.2) +
-      geom_ribbon(data = ~ filter(.x, Type == "Forecast"), 
-                  aes(ymin = Lower, ymax = Upper), alpha = 0.2, fill = "red") +
+      geom_line(data = ~ filter(.x, Type == "Historical"), size = 1.2) +
       geom_point(data = ~ filter(.x, Type == "Historical"), size = 2) +
       geom_point(data = ~ filter(.x, Type == "Forecast"), size = 2) +
+      geom_smooth(data = ~ filter(.x, Type == "Forecast"), method = "loess", se = FALSE, linetype = "dashed", size = 1.2) +
+      geom_ribbon(data = ~ filter(.x, Type == "Forecast"), 
+                  aes(ymin = Lower, ymax = Upper), alpha = 0.2, fill = "red") +
       scale_color_manual(values = c("Historical" = "darkgreen", "Forecast" = "red")) +
-      labs(title = paste("Forecast for", input$selected_item, "in", paste(input$selected_countries, collapse = ", ")),
+      labs(title = paste("Forecast for", paste(input$selected_item, collapse = ", "), "in", paste(input$selected_countries, collapse = ", ")),
            x = "Year", y = "Yield (kg/ha)") +
       theme_minimal() +
       theme(legend.position = "bottom")
@@ -497,12 +584,163 @@ server <- function(input, output, session) {
     ggplotly(p) %>% config(displayModeBar = FALSE)
   })
   
-  # Crop Risk: Table of Crops in Danger
-  output$crops_in_danger_table <- renderTable({
-    crops_in_danger() %>%
-      rename(Country = Area, Crop = Item, `Average Yield (kg/ha)` = Avg_Yield, `CAGR (%)` = CAGR) %>%
+  # Crop Risk: Table with Colors
+  output$crops_in_danger_table <- DT::renderDT({
+    data <- crops_in_danger() %>%
+      rename(Country = Area, Crop = Item, `Average Yield (kg/ha)` = Avg_Yield, `CAGR (%)` = CAGR, `Risk Level` = Risk_Level) %>%
       mutate(`Average Yield (kg/ha)` = round(`Average Yield (kg/ha)`, 2), `CAGR (%)` = round(`CAGR (%)`, 2))
+    
+    DT::datatable(data, 
+                  options = list(pageLength = 10, autoWidth = TRUE),
+                  rownames = FALSE) %>%
+      DT::formatStyle(
+        "Risk Level",
+        target = "cell",
+        backgroundColor = DT::styleEqual(
+          c("High", "Moderate", "Low"),
+          c("red", "yellow", "green")
+        )
+      ) %>%
+      DT::formatStyle(
+        "CAGR (%)",
+        backgroundColor = DT::styleInterval(c(-1, 0), c("red", "yellow", "green"))
+      ) %>%
+      DT::formatStyle(
+        "Average Yield (kg/ha)",
+        backgroundColor = DT::styleInterval(
+          quantile(africa_data()$Value, c(0.1, 0.25), na.rm = TRUE),
+          c("red", "yellow", "green")
+        )
+      )
   })
+  
+  # Report: Generate markdown content
+  report_content <- reactive({
+    data <- filtered_data()
+    avg_yield <- round(mean(data$Value, na.rm = TRUE), 2)
+    africa_avg <- round(africa_avg_yield(), 2)
+    yearly_data <- data %>%
+      group_by(Year) %>%
+      summarise(Avg_Yield = mean(Value, na.rm = TRUE), .groups = "drop")
+    
+    trend_text <- if (nrow(yearly_data) >= 2) {
+      model <- lm(Avg_Yield ~ Year, data = yearly_data)
+      slope <- coef(model)["Year"]
+      if (slope > 0.1) "increasing" else if (slope < -0.1) "decreasing" else "stable"
+    } else {
+      "insufficient data"
+    }
+    
+    cagr <- if (nrow(yearly_data) >= 2) {
+      round(((yearly_data$Avg_Yield[nrow(yearly_data)] / yearly_data$Avg_Yield[1])^(1/(nrow(yearly_data)-1)) - 1) * 100, 2)
+    } else {
+      "N/A"
+    }
+    
+    top_crops <- top_crops_data() %>%
+      mutate(Avg_Yield = round(Avg_Yield, 2)) %>%
+      slice_head(n = 3)
+    top_countries <- top_countries_data() %>%
+      mutate(Avg_Yield = round(Avg_Yield, 2)) %>%
+      slice_head(n = 3)
+    bottom_countries <- bottom_countries_data() %>%
+      mutate(Avg_Yield = round(Avg_Yield, 2)) %>%
+      slice_head(n = 3)
+    outliers <- filtered_data() %>%
+      arrange(desc(Value)) %>%
+      slice_head(n = 3) %>%
+      select(Country = Area, Crop = Item, Year, Value) %>%
+      mutate(Value = round(Value, 2))
+    comparison <- filtered_data() %>%
+      group_by(Area, Item) %>%
+      summarise(
+        Avg_Yield = round(mean(Value, na.rm = TRUE), 2),
+        CAGR = round(((mean(Value[Year == max(Year)], na.rm = TRUE) / 
+                         mean(Value[Year == min(Year)], na.rm = TRUE))^(1/(max(Year) - min(Year))) - 1) * 100, 2),
+        .groups = "drop"
+      ) %>%
+      arrange(CAGR) %>%
+      slice_head(n = 3)
+    forecast_data <- crop_forecast_data()
+    forecast_summary <- if (!is.null(forecast_data)) {
+      forecast_vals <- forecast_data$forecast %>%
+        filter(Year %in% 2024:2026) %>%
+        mutate(Yield = round(Yield, 0))
+      mape <- round(forecast_data$mape, 2)
+      paste("Forecasted yields: 2024 -", forecast_vals$Yield[1], "kg/ha, 2025 -", forecast_vals$Yield[2], "kg/ha, 2026 -", forecast_vals$Yield[3], "kg/ha. Model MAPE:", mape, "%")
+    } else {
+      "Insufficient data for forecasting"
+    }
+    risk_crops <- crops_in_danger() %>%
+      mutate(`Average Yield (kg/ha)` = round(Avg_Yield, 2), `CAGR (%)` = round(CAGR, 2)) %>%
+      rename(Country = Area, Crop = Item, `Risk Level` = Risk_Level) %>%
+      slice_head(n = 3)
+    
+    paste0(
+      "# Crop Yield Performance Report\n\n",
+      "## Selection Summary\n",
+      "- **Crops**: ", paste(input$selected_item, collapse = ", "), "\n",
+      "- **Countries**: ", paste(input$selected_countries, collapse = ", "), "\n",
+      "- **Year Range**: ", input$year_range[1], " to ", input$year_range[2], "\n\n",
+      "## Key Performance Indicators\n",
+      "- **Average Yield**: ", avg_yield, " kg/ha\n",
+      "- **Africa-Wide Average Yield**: ", africa_avg, " kg/ha\n",
+      "- **Trend**: ", trend_text, "\n",
+      "- **CAGR**: ", cagr, "%\n\n",
+      "## Trend Analysis\n",
+      "The yield trend plot shows the average yield over time for the selected crops and countries. The trend is ", trend_text, ", indicating ", 
+      ifelse(trend_text == "increasing", "improving productivity", ifelse(trend_text == "decreasing", "declining productivity", "stable performance")), ".\n\n",
+      "## Top Performing Crops\n",
+      ifelse(nrow(top_crops) > 0, 
+             paste("The top performing crops are:\n", 
+                   paste("- ", top_crops$Item, ": ", top_crops$Avg_Yield, " kg/ha", collapse = "\n"), "\n"),
+             "No crop data available for the selected filters.\n"), "\n",
+      "## Top Performing Countries\n",
+      ifelse(nrow(top_countries) > 0, 
+             paste("The top performing countries are:\n", 
+                   paste("- ", top_countries$Area, ": ", top_countries$Avg_Yield, " kg/ha", collapse = "\n"), "\n"),
+             "No country data available for the selected filters.\n"), "\n",
+      "## Bottom Performing Countries\n",
+      ifelse(nrow(bottom_countries) > 0, 
+             paste("The bottom performing countries are:\n", 
+                   paste("- ", bottom_countries$Area, ": ", bottom_countries$Avg_Yield, " kg/ha", collapse = "\n"), "\n"),
+             "No country data available for the selected filters.\n"), "\n",
+      "## Yield Distribution\n",
+      "The boxplot shows the yield distribution across selected countries, highlighting variability and potential outliers. The outliers table lists:\n",
+      ifelse(nrow(outliers) > 0, 
+             paste(paste("- ", outliers$Country, " (", outliers$Crop, ", ", outliers$Year, "): ", outliers$Value, " kg/ha", collapse = "\n"), "\n"),
+             "No outliers detected.\n"), "\n",
+      "## Performance Comparison\n",
+      ifelse(nrow(comparison) > 0, 
+             paste("Key performance metrics include:\n", 
+                   paste("- ", comparison$Area, " (", comparison$Item, "): Avg Yield = ", comparison$Avg_Yield, " kg/ha, CAGR = ", comparison$CAGR, "%", collapse = "\n"), "\n"),
+             "No comparison data available.\n"), "\n",
+      "## Forecast\n",
+      forecast_summary, "\n\n",
+      "## Crops at Risk\n",
+      ifelse(nrow(risk_crops) > 0, 
+             paste("Crops with high or moderate risk include:\n", 
+                   paste("- ", risk_crops$Country, " (", risk_crops$Crop, "): ", risk_crops$`Average Yield (kg/ha)`, " kg/ha, CAGR = ", risk_crops$`CAGR (%)`, "%, Risk = ", risk_crops$`Risk Level`, collapse = "\n"), "\n"),
+             "No crops identified as at risk.\n")
+    )
+  })
+  
+  # Report: Preview
+  output$report_preview <- renderUI({
+    HTML(markdown::markdownToHTML(text = report_content(), fragment.only = TRUE))
+  })
+  
+  # Report: Download
+  output$download_report <- downloadHandler(
+    filename = function() {
+      paste("Crop_Yield_Report_", Sys.Date(), ".html", sep = "")
+    },
+    content = function(file) {
+      temp_file <- tempfile(fileext = ".Rmd")
+      writeLines(report_content(), temp_file)
+      rmarkdown::render(temp_file, output_file = file, output_format = "html_document")
+    }
+  )
 }
 
 # Run the app
